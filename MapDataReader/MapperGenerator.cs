@@ -47,22 +47,26 @@ namespace MapDataReader
 
 							private static void SetPropertyByName(this {typeNodeSymbol.FullName()} target, int namehash, object value)
 							{{
+								switch (namehash)
+								{{
 								{"\r\n" + allProperties.Select(p =>
 								{
 									var pTypeName = p.Type.FullName();
 									if (p.Type.IsReferenceType || pTypeName.EndsWith("?")) //ref types and nullable type - just cast to property type
 									{
-										return $@"	if (namehash == {GetDeterministicHashCode(p.Name)}) {{ target.{p.Name} = value as {pTypeName}; return; }}";
+										return $@"	case {GetDeterministicHashCode(p.Name)}: {{ target.{p.Name} = value as {pTypeName}; break; }}";
 									}
 									else if (p.Type.TypeKind == TypeKind.Enum) //enum? pre-convert to underlying type then to int, you can't cast a boxed int to enum directly. Also to support assigning "smallint" database col to int32 (for example), which does not work at first (you can't cast a boxed "byte" to "int")
 									{
-										return $@"	if (value != null && namehash == {GetDeterministicHashCode(p.Name)}) {{ target.{p.Name} = ({pTypeName})(value.GetType() == typeof(int) ? (int)value : (int)Convert.ChangeType(value, typeof(int))); return; }}"; //pre-convert enums to int first (after unboxing, see below)
+										return $@"	case {GetDeterministicHashCode(p.Name)}: if (value == null) break; {{ target.{p.Name} = ({pTypeName})(value.GetType() == typeof(int) ? (int)value : (int)Convert.ChangeType(value, typeof(int))); break; }}"; //pre-convert enums to int first (after unboxing, see below)
 									}
 									else //primitive types. use Convert.ChangeType before casting. To support assigning "smallint" database col to int32 (for example), which does not work at first (you can't cast a boxed "byte" to "int")
 									{
-										return $@"	if (value != null && namehash == {GetDeterministicHashCode(p.Name)}) {{ target.{p.Name} = value.GetType() == typeof({pTypeName}) ? ({pTypeName})value : ({pTypeName})Convert.ChangeType(value, typeof({pTypeName})); return; }}";
+										return $@"	case {GetDeterministicHashCode(p.Name)}: if (value == null) break; {{ target.{p.Name} = value.GetType() == typeof({pTypeName}) ? ({pTypeName})value : ({pTypeName})Convert.ChangeType(value, typeof({pTypeName})); break; }}";
 									}
-								}).StringConcat("\r\n") } 
+								}).StringConcat("\r\n") }
+								default: return;
+								}} // end of switch
 
 
 							}} //end method";
@@ -70,7 +74,6 @@ namespace MapDataReader
 				if (typeNodeSymbol.InstanceConstructors.Any(c => !c.Parameters.Any())) //has a constructor without parameters?
 				{
 					src += $@"
-
 							public static List<{typeNodeSymbol.FullName()}> To{typeNode.Identifier}(this IDataReader dr)
 							{{
 								var list = new List<{typeNodeSymbol.FullName()}>();
@@ -94,7 +97,28 @@ namespace MapDataReader
 								}}
 								dr.Close();
 								return list;
-							}}";
+							}}
+";
+					src += $@"
+
+							public static void ForEach{typeNode.Identifier}(this IDataReader dr, Action<{typeNodeSymbol.FullName()}> action)
+							{{
+								int[] columnNameHashes = Enumerable.Range(0, dr.FieldCount).Select(i => MapperGenerator.GetDeterministicHashCode(dr.GetName(i))).ToArray();
+								while (dr.Read())
+								{{
+									var result = new {typeNodeSymbol.FullName()}();
+									for (int i = 0; i < columnNameHashes.Length; ++i)
+									{{
+										var value = dr[i];
+										var col = columnNameHashes[i];
+										if (value is DBNull) value = null;
+										SetPropertyByName(result, col, value);
+									}}
+									action(result);
+								}}
+								dr.Close();
+							}}
+				";
 				}
 
 				src += "\n}"; //end class
